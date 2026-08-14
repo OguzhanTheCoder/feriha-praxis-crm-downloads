@@ -1,0 +1,36 @@
+name: Publish installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download private source release
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: |
+          mkdir publish
+          gh release download v1.0.1 \
+            --repo OguzhanTheCoder/heilpraktiker \
+            --pattern "Feriha-Praxis-CRM-Setup.exe" \
+            --pattern "Feriha-Praxis-CRM-Setup.exe.sha256" \
+            --dir publish
+
+      - name: Verify installer checksum
+        run: |
+          cd publish
+          sha256sum --check Feriha-Praxis-CRM-Setup.exe.sha256
+
+      - name: Publish public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v1.0.1 publish/* \
+            --repo OguzhanTheCoder/feriha-praxis-crm-downloads \
+            --title "Feriha Praxis CRM v1.0.1" \
+            --notes "Offizieller Windows-Installer für Feriha Praxis CRM."
