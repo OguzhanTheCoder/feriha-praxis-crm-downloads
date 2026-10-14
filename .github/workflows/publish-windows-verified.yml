@@ -1,0 +1,71 @@
+name: Publish verified Windows installer
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+      artifact_url:
+        required: true
+        type: string
+      artifact_sha256:
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Verify and publish Windows installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, urllib.request, urllib.parse, zipfile
+          data = json.load(open(os.environ['GITHUB_EVENT_PATH']))['inputs']
+          version = data['version']
+          expected = data['artifact_sha256']
+          parsed = urllib.parse.urlparse(data['artifact_url'])
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version) or not re.fullmatch(r'[a-f0-9]{64}', expected):
+              raise RuntimeError('Invalid version or checksum')
+          if parsed.scheme != 'https' or not parsed.hostname or not (parsed.hostname.endswith('.blob.core.windows.net') or parsed.hostname.endswith('.actions.githubusercontent.com')):
+              raise RuntimeError('Invalid artifact download host')
+          work = pathlib.Path(os.environ['RUNNER_TEMP']) / 'windows-packages'
+          work.mkdir()
+          def digest(file):
+              result = hashlib.sha256()
+              with open(file, 'rb') as source:
+                  for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                      result.update(chunk)
+              return result.hexdigest()
+          archive = work / 'windows.zip'
+          with urllib.request.urlopen(data['artifact_url'], timeout=600) as source, archive.open('wb') as target:
+              while True:
+                  chunk = source.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  target.write(chunk)
+          if digest(archive) != expected:
+              raise RuntimeError('Artifact checksum mismatch')
+          name = 'Feriha-Praxis-CRM-Setup.exe'
+          with zipfile.ZipFile(archive) as package:
+              if set(package.namelist()) != {name, name + '.sha256'}:
+                  raise RuntimeError('Unexpected artifact contents')
+              package.extractall(work)
+          installer = work / name
+          actual = digest(installer)
+          if actual != (work / (name + '.sha256')).read_text(encoding='utf-8-sig').split()[0]:
+              raise RuntimeError('Installer checksum mismatch')
+          print('Windows installer verified:', actual)
+          repo = os.environ['GITHUB_REPOSITORY']
+          tag = 'v' + version
+          notes = work / 'notes.md'
+          notes.write_text('Feriha Praxis CRM fuer Windows 10/11 (64 Bit). Geprueft: Anwendungstests, portable Runtimes, vollstaendige Abrechnungs-/Diagnosekataloge, lokaler Server, Portkonflikt, Doppelstart, Datenerhalt, Diagnosearchiv und echte Inferenz mit dem mitgelieferten Offline-KI-Modell. Installer und Launcher besitzen derzeit keine Authenticode-Signatur; Windows kann eine SmartScreen-Warnung anzeigen. SHA-256 liegt in der Begleitdatei.\n')
+          found = subprocess.run(['gh', 'release', 'view', tag, '--repo', repo], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          if found.returncode:
+              subprocess.run(['gh', 'release', 'create', tag, '--repo', repo, '--title', 'Feriha Praxis CRM ' + version + ' - Windows', '--draft', '--notes-file', str(notes)], check=True)
+          subprocess.run(['gh', 'release', 'upload', tag, str(installer), str(work / (name + '.sha256')), '--repo', repo, '--clobber'], check=True)
+          subprocess.run(['gh', 'release', 'edit', tag, '--repo', repo, '--draft=false', '--latest', '--notes-file', str(notes)], check=True)
+          PY
