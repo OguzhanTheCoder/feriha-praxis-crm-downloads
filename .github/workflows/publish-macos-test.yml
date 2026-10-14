@@ -1,0 +1,83 @@
+name: Publish verified macOS test installers
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+      arm64_url:
+        required: true
+        type: string
+      arm64_sha256:
+        required: true
+        type: string
+      x64_url:
+        required: true
+        type: string
+      x64_sha256:
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Verify and publish test installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, urllib.request, urllib.parse, zipfile
+          data = json.load(open(os.environ['GITHUB_EVENT_PATH']))['inputs']
+          version = data['version']
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+              raise RuntimeError('Invalid version')
+          work = pathlib.Path(os.environ['RUNNER_TEMP']) / 'macos-packages'
+          work.mkdir()
+          def digest(file):
+              result = hashlib.sha256()
+              with open(file, 'rb') as source:
+                  for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                      result.update(chunk)
+              return result.hexdigest()
+          files = []
+          for arch in ('arm64', 'x64'):
+              url = data[arch + '_url']
+              parsed = urllib.parse.urlparse(url)
+              if parsed.scheme != 'https' or not (parsed.hostname.endswith('.blob.core.windows.net') or parsed.hostname.endswith('.actions.githubusercontent.com')):
+                  raise RuntimeError('Invalid artifact download host')
+              expected = data[arch + '_sha256']
+              if not re.fullmatch(r'[a-f0-9]{64}', expected):
+                  raise RuntimeError('Invalid artifact checksum')
+              archive = work / (arch + '.zip')
+              with urllib.request.urlopen(url, timeout=600) as source, archive.open('wb') as target:
+                  while True:
+                      chunk = source.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      target.write(chunk)
+              if digest(archive) != expected:
+                  raise RuntimeError('Artifact checksum mismatch')
+              name = f'Feriha-Praxis-CRM-{version}-macos-{arch}.dmg'
+              with zipfile.ZipFile(archive) as package:
+                  if set(package.namelist()) != {name, name + '.sha256'}:
+                      raise RuntimeError('Unexpected artifact contents')
+                  package.extractall(work)
+              dmg = work / name
+              actual = digest(dmg)
+              if actual != (work / (name + '.sha256')).read_text().split()[0]:
+                  raise RuntimeError('DMG checksum mismatch')
+              files += [str(dmg), str(work / (name + '.sha256'))]
+              print(arch, 'verified', actual)
+          repo = os.environ['GITHUB_REPOSITORY']
+          tag = 'macos-test-v' + version
+          notes = work / 'notes.md'
+          notes.write_text('Unsignierte Testversion fuer macOS 14 oder neuer. Apple Silicon und Intel wurden separat auf macOS getestet: Server/Datenbank, lokale KI-Inferenz und OCR fuer Bilder sowie gescannte PDFs. DMG oeffnen, App in Programme ziehen und starten. Praxisdaten bleiben bei Updates erhalten. macOS kann die erste Ausfuehrung wegen fehlender Apple-Signierung und Notarisierung blockieren. Apple-Hinweise: https://support.apple.com/de-de/102445\n\nPruefsummen liegen in den .sha256-Dateien. Dies ist kein signierter Kunden-Release.\n')
+          found = subprocess.run(['gh', 'release', 'view', tag, '--repo', repo], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          if found.returncode:
+              subprocess.run(['gh', 'release', 'create', tag, '--repo', repo, '--title', 'Feriha Praxis CRM ' + version + ' - macOS Testversion', '--draft', '--prerelease', '--latest=false', '--notes-file', str(notes)], check=True)
+          subprocess.run(['gh', 'release', 'upload', tag, *files, '--repo', repo, '--clobber'], check=True)
+          subprocess.run(['gh', 'release', 'edit', tag, '--repo', repo, '--draft=false', '--prerelease', '--latest=false', '--notes-file', str(notes)], check=True)
+          PY
